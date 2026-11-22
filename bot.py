@@ -9,7 +9,7 @@ import logging
 import os
 import sqlite3
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -25,6 +25,7 @@ from aiogram.types import (
 
 SITE_URL = os.environ.get("SITE_URL", "https://example.com")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # fikrlar shu ID ga keladi
+CHANNEL = os.environ.get("CHANNEL", "@oltinkolliklarinfo")  # majburiy obuna kanali
 
 # ---------------------------------------------------------------- baza
 db = sqlite3.connect("oltinkolliklar.db")
@@ -96,6 +97,9 @@ T = {
         "settings": "⚙️ Sozlamalar\n\nTil: O'zbekcha",
         "choose_lang": "Tilni tanlang / Выберите язык:",
         "lang_set": "Til o'zgartirildi.",
+        "sub_ask": "Botdan foydalanish uchun avval kanalimizga obuna bo'ling 👇",
+        "sub_go": "📢 Kanalga o'tish", "sub_check": "✅ Tekshirish",
+        "sub_no": "Siz hali obuna bo'lmagansiz. Kanalga obuna bo'lib, qayta bosing.",
     },
     "ru": {
         "hello": "Добро пожаловать на портал Oltinkolliklar! Выберите раздел 👇",
@@ -112,6 +116,9 @@ T = {
         "settings": "⚙️ Настройки\n\nЯзык: Русский",
         "choose_lang": "Tilni tanlang / Выберите язык:",
         "lang_set": "Язык изменён.",
+        "sub_ask": "Чтобы пользоваться ботом, сначала подпишитесь на наш канал 👇",
+        "sub_go": "📢 Перейти на канал", "sub_check": "✅ Проверить",
+        "sub_no": "Вы ещё не подписаны. Подпишитесь на канал и нажмите снова.",
     },
 }
 
@@ -143,7 +150,51 @@ class Feedback(StatesGroup):
     text = State()
 
 
+async def subscribed(bot: Bot, uid: int) -> bool:
+    """Foydalanuvchi kanalga a'zomi. Bot kanalda admin bo'lmasa, tekshiruv
+    ishlamaydi: shunda foydalanuvchilarni to'sib qo'ymaslik uchun ruxsat beriladi."""
+    try:
+        member = await bot.get_chat_member(CHANNEL, uid)
+        return member.status in ("member", "administrator", "creator")
+    except Exception as exc:
+        logging.warning("Obunani tekshirib bo'lmadi (bot kanalda adminmi?): %s", exc)
+        return True
+
+
+class SubscriptionMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = event.from_user
+        if isinstance(event, CallbackQuery) and event.data == "sub:check":
+            return await handler(event, data)
+        if await subscribed(event.bot, user.id):
+            return await handler(event, data)
+        lang = get_lang(user.id)
+        t = T[lang]
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["sub_go"], url=f"https://t.me/{CHANNEL.lstrip('@')}")],
+            [InlineKeyboardButton(text=t["sub_check"], callback_data="sub:check")],
+        ])
+        if isinstance(event, CallbackQuery):
+            await event.message.answer(t["sub_ask"], reply_markup=kb)
+            await event.answer()
+        else:
+            await event.answer(t["sub_ask"], reply_markup=kb)
+
+
 router = Router()
+router.message.middleware(SubscriptionMiddleware())
+router.callback_query.middleware(SubscriptionMiddleware())
+
+
+# ---------------------------------------------------------------- majburiy obuna
+@router.callback_query(F.data == "sub:check")
+async def sub_check(c: CallbackQuery):
+    lang = get_lang(c.from_user.id)
+    if await subscribed(c.bot, c.from_user.id):
+        await c.message.answer(T[lang]["hello"], reply_markup=menu_kb(lang))
+        await c.answer()
+    else:
+        await c.answer(T[lang]["sub_no"], show_alert=True)
 
 
 # ---------------------------------------------------------------- buyruqlar va menyu
